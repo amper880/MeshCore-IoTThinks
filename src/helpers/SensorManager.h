@@ -2,6 +2,7 @@
 
 #include <CayenneLPP.h>
 #include "sensors/LocationProvider.h"
+#include "KeyValueStore.h"
 
 #define TELEM_PERM_BASE         0x01   // 'base' permission includes battery
 #define TELEM_PERM_LOCATION     0x02
@@ -24,6 +25,15 @@ public:
   virtual bool setSettingValue(const char* name, const char* value) { return false; }
   virtual LocationProvider* getLocationProvider() { return NULL; }
   virtual bool isGPSDetected() const { return false; }
+
+  // CLI commands served by the sensor manager (`get sensors`, `get/set epever`).
+  // Returns false when the command is not one of them. Settings that must
+  // survive a reboot go into `settings` (the node's custom prefs); the caller
+  // saves the prefs when they changed.
+  virtual bool handleCLICommand(const char* command, char* reply, size_t reply_cap, KeyValueStore* settings) { return false; }
+
+  // Applies the settings saved by handleCLICommand(), once the prefs are loaded.
+  virtual void loadSettings(KeyValueStore* settings) { }
 
   // Helper functions to manage setting by keys (useful in many places ...)
   const char* getSettingByKey(const char* key) {

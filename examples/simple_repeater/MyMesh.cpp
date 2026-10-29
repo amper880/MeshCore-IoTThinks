@@ -967,6 +967,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _fs = fs;
   // load persisted prefs
   _cli.loadPrefs(_fs);
+  sensors.loadSettings(_prefs.getCustom());   // module switches, e.g. `set epever off`
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
@@ -1303,6 +1304,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+  } else if (sensors.handleCLICommand(command, reply, CLI_EXTRA_REPLY_SIZE, _prefs.getCustom())) {
+    // `get sensors`, `get/set epever`
+    if (_prefs.isDirty()) savePrefs();
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }

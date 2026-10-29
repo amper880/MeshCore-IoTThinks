@@ -13,6 +13,8 @@ protected:
   struct ActiveSensor {
     void    (*query)(uint8_t channel, uint8_t sub_channel, CayenneLPP& telemetry);
     uint8_t   sub_channel;
+    uint8_t   num_sub_channels;  // > 1 for multi-channel parts (`get sensors` shows the sub-channel)
+    const char* name;
   };
 
   ActiveSensor _active_sensors[MAX_ACTIVE_SENSORS];
@@ -55,4 +57,6 @@ public:
   const char* getSettingName(int i) const override;
   const char* getSettingValue(int i) const override;
   bool setSettingValue(const char* name, const char* value) override;
+  bool handleCLICommand(const char* command, char* reply, size_t reply_cap, KeyValueStore* settings) override;
+  void loadSettings(KeyValueStore* settings) override;
 };

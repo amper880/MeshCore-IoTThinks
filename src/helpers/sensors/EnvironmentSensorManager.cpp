@@ -1,6 +1,11 @@
 #include "EnvironmentSensorManager.h"
 
 #include <Wire.h>
+#include <stdarg.h>
+#include <stdio.h>
+#if ENV_INCLUDE_EPEVER
+#include "EpeverModbus.h"
+#endif
 
 #if ENV_PIN_SDA && ENV_PIN_SCL
 #define TELEM_WIRE &Wire1  // Use Wire1 as the I2C bus for Environment Sensors
@@ -685,7 +690,7 @@ bool EnvironmentSensorManager::begin() {
     MESH_DEBUG_PRINTLN("Found %s at address: %02X", def.name, def.address);
     detected[def.address] = false;  // consumed; later entries must not re-claim this device
     for (uint8_t sub = 0; sub < n && _active_sensor_count < MAX_ACTIVE_SENSORS; sub++) {
-      _active_sensors[_active_sensor_count++] = { def.query, sub };
+      _active_sensors[_active_sensor_count++] = { def.query, sub, n, def.name };
     }
   }
 
@@ -710,9 +715,157 @@ bool EnvironmentSensorManager::querySensors(uint8_t requester_permissions, Cayen
       _active_sensors[i].query(next_available_channel, _active_sensors[i].sub_channel, telemetry);
       next_available_channel++;
     }
+
+#if ENV_INCLUDE_EPEVER
+    // Charge controller after the I2C sensors: battery, PV, then the load
+    // output when the controller reports it.
+    // A controller that is missing or not answering is simply left out.
+    EpeverReading e;
+    if (epever.isEnabled() && epever.get(e)) {
+      uint8_t batt_ch = next_available_channel++;
+      uint8_t pv_ch = next_available_channel++;
+
+      telemetry.addVoltage(batt_ch, e.batt_voltage_v);
+      telemetry.addCurrent(batt_ch, e.batt_charge_current_a);
+      if (e.has_temperature) telemetry.addTemperature(batt_ch, e.batt_temperature_c);
+      telemetry.addVoltage(pv_ch, e.pv_voltage_v);
+      telemetry.addCurrent(pv_ch, e.pv_current_a);
+      telemetry.addPower(pv_ch, e.pv_power_w);
+      if (e.has_load) {
+        uint8_t load_ch = next_available_channel++;
+        telemetry.addVoltage(load_ch, e.load_voltage_v);
+        telemetry.addCurrent(load_ch, e.load_current_a);
+      }
+    }
+#endif
   }
 
   return true;
+}
+
+// ============================================================
+// CLI: `get sensors` and `get epever`
+// ============================================================
+
+static int cli_appendf(char* buf, int len, size_t cap, const char* fmt, ...) {
+  if (len < 0 || (size_t)len >= cap - 1) return len;
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf + len, cap - len, fmt, ap);
+  va_end(ap);
+  if (n < 0) return len;
+  return ((size_t)(len + n) < cap - 1) ? len + n : (int)cap - 1;
+}
+
+// Prints the values one sensor put into an LPP buffer, without units the
+// sensor did not report.
+#if ENV_PIN_SDA && ENV_PIN_SCL
+#define TELEM_WIRE_NAME "Wire1"
+#else
+#define TELEM_WIRE_NAME "Wire"
+#endif
+
+// Big-endian LPP value, optionally signed.
+static float lpp_value(const uint8_t* d, int size, float mult, bool is_signed) {
+  uint32_t v = 0;
+  for (int i = 0; i < size; i++) v = (v << 8) | d[i];
+  if (is_signed && size == 2) return (int16_t)v / mult;
+  return v / mult;
+}
+
+static int lpp_size(uint8_t type) {
+  switch (type) {
+    case 136: return 9;                 // GPS
+    case 113: case 134: return 6;       // accelerometer, gyrometer
+    case 100: case 118: case 130: case 131: case 133: return 4;
+    case 135: return 3;                 // colour
+    case 2: case 3: case 101: case 103: case 115: case 116: case 117:
+    case 121: case 125: case 128: case 132: return 2;
+  }
+  return 1;
+}
+
+static int cli_append_lpp(char* reply, int len, size_t cap, const uint8_t* b, int n) {
+  int i = 0;
+  while (i + 2 <= n) {
+    uint8_t type = b[i + 1];
+    const uint8_t* d = &b[i + 2];
+    int size = lpp_size(type);
+    if (i + 2 + size > n) break;
+    switch (type) {
+      case 103: len = cli_appendf(reply, len, cap, " %.1fC", lpp_value(d, 2, 10.0f, true)); break;      // temperature
+      case 104: len = cli_appendf(reply, len, cap, " %.0f%%", lpp_value(d, 1, 2.0f, false)); break;     // humidity
+      case 115: len = cli_appendf(reply, len, cap, " %.1fhPa", lpp_value(d, 2, 10.0f, false)); break;   // pressure
+      case 116: len = cli_appendf(reply, len, cap, " %.2fV", lpp_value(d, 2, 100.0f, false)); break;    // voltage
+      case 117: len = cli_appendf(reply, len, cap, " %.3fA", lpp_value(d, 2, 1000.0f, false)); break;   // current
+      case 128: len = cli_appendf(reply, len, cap, " %.0fW", lpp_value(d, 2, 1.0f, false)); break;      // power
+      default: break;   // altitude, gas resistance, ...: not needed to check the wiring
+    }
+    i += 2 + size;
+  }
+  return len;
+}
+
+// Key of the Epever on/off switch in the node's custom prefs
+#define EPEVER_SETTING_KEY "epv"
+
+void EnvironmentSensorManager::loadSettings(KeyValueStore* settings) {
+#if ENV_INCLUDE_EPEVER
+  char v[4];
+  if (settings && settings->getByKey(EPEVER_SETTING_KEY, v, sizeof(v) - 1)) {
+    epever.setEnabled(v[0] != '0');
+  }
+#endif
+}
+
+bool EnvironmentSensorManager::handleCLICommand(const char* command, char* reply, size_t cap, KeyValueStore* settings) {
+  if (strcmp(command, "get sensors") == 0) {
+    int len = cli_appendf(reply, 0, cap, "> %s: %d", TELEM_WIRE_NAME, _active_sensor_count);
+    for (int i = 0; i < _active_sensor_count; i++) {
+      const ActiveSensor& s = _active_sensors[i];
+      if (s.num_sub_channels > 1) {
+        len = cli_appendf(reply, len, cap, ", %s/%u", s.name, (unsigned)s.sub_channel + 1);
+      } else {
+        len = cli_appendf(reply, len, cap, ", %s", s.name);
+      }
+      CayenneLPP lpp(48);
+      s.query(TELEM_CHANNEL_SELF + 1, s.sub_channel, lpp);
+      if (lpp.getSize() == 0) {
+        len = cli_appendf(reply, len, cap, " read failed");
+      } else {
+        len = cli_append_lpp(reply, len, cap, lpp.getBuffer(), lpp.getSize());
+      }
+    }
+    return true;
+  }
+  if (strcmp(command, "get epever") == 0) {
+#if ENV_INCLUDE_EPEVER
+    if (epever.isEnabled()) {
+      epever.formatStatus(reply, cap);
+    } else {
+      snprintf(reply, cap, "> off (set epever on)");
+    }
+#else
+    snprintf(reply, cap, "Error: no Epever support in this build");
+#endif
+    return true;
+  }
+  if (memcmp(command, "set epever ", 11) == 0) {
+#if ENV_INCLUDE_EPEVER
+    const char* val = command + 11;
+    bool on;
+    if (strcmp(val, "on") == 0) on = true;
+    else if (strcmp(val, "off") == 0) on = false;
+    else { snprintf(reply, cap, "Error: must be on or off"); return true; }
+    epever.setEnabled(on);
+    if (settings) settings->setByKey(EPEVER_SETTING_KEY, on ? "1" : "0");
+    snprintf(reply, cap, "OK - epever %s", on ? "on" : "off");
+#else
+    snprintf(reply, cap, "Error: no Epever support in this build");
+#endif
+    return true;
+  }
+  return false;
 }
 
 
