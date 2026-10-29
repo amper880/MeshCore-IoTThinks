@@ -1,4 +1,8 @@
 #include "MyMesh.h"
+
+// Key of the serial observer switch in the node's custom prefs
+#define OBSERVER_SERIAL_KEY "obss"
+
 #include <algorithm>
 
 /* ------------------------------ Config -------------------------------- */
@@ -467,8 +471,18 @@ const char *MyMesh::getLogDateTime() {
   return tmp;
 }
 
-void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 #if MESH_PACKET_LOGGING
+extern "C" bool mesh_packet_log_line_start();
+#endif
+
+void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+#ifdef WITH_MQTT_UPLINK
+  _uplink_rssi = rssi;
+  _uplink_raw_len = (len > 0 && len <= (int)sizeof(_uplink_raw)) ? len : 0;
+  if (_uplink_raw_len) memcpy(_uplink_raw, raw, _uplink_raw_len);
+#endif
+#if MESH_PACKET_LOGGING
+  if (!mesh_packet_log_line_start()) return;
   Serial.print(getLogDateTime());
   Serial.print(" RAW: ");
   mesh::Utils::printHex(Serial, raw, len);
@@ -477,6 +491,13 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+#ifdef WITH_MQTT_UPLINK
+  if (_uplink_raw_len > 0) {
+    uplink.queuePacket(_prefs.node_name, pkt, _uplink_raw, _uplink_raw_len, pkt->getSNR(), _uplink_rssi,
+                       score, getRTCClock()->getCurrentTime());
+    _uplink_raw_len = 0;
+  }
+#endif
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 1) {
     bridge.sendPacket(pkt);
@@ -1009,6 +1030,16 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   board.attachDynamicPrefs(_prefs.getCustom());
 
+#ifdef WITH_SERIAL_OBSERVER
+  {
+    char v[4];
+    if (_prefs.getCustom()->getByKey(OBSERVER_SERIAL_KEY, v, sizeof(v) - 1)) _serial_observer = (v[0] != '0');
+  }
+#endif
+#ifdef WITH_MQTT_UPLINK
+  uplink.begin(_fs, self_id);   // WiFi stays off unless `set uplink.enable on` and configured
+#endif
+
   updateAdvertTimer();
   updateFloodAdvertTimer();
 
@@ -1307,10 +1338,82 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   } else if (sensors.handleCLICommand(command, reply, CLI_EXTRA_REPLY_SIZE, _prefs.getCustom())) {
     // `get sensors`, `get/set epever`
     if (_prefs.isDirty()) savePrefs();
+  } else if (handleObserverCommand(command, reply)) {
+    // `get/set observer.serial`, `get/set uplink.*`
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
 }
+
+// Packet observer module: serial (WITH_SERIAL_OBSERVER) and WiFi/MQTT
+// (WITH_MQTT_UPLINK). Returns false for other commands.
+bool MyMesh::handleObserverCommand(const char* command, char* reply) {
+  if (strcmp(command, "get observer.serial") == 0) {
+#ifdef WITH_SERIAL_OBSERVER
+    snprintf(reply, CLI_EXTRA_REPLY_SIZE, "> %s", _serial_observer ? "on" : "off");
+#else
+    snprintf(reply, CLI_EXTRA_REPLY_SIZE, "Error: no serial observer in this build");
+#endif
+    return true;
+  }
+  if (memcmp(command, "set observer.serial ", 20) == 0) {
+#ifdef WITH_SERIAL_OBSERVER
+    const char* val = command + 20;
+    if (strcmp(val, "on") == 0) _serial_observer = true;
+    else if (strcmp(val, "off") == 0) _serial_observer = false;
+    else { snprintf(reply, CLI_EXTRA_REPLY_SIZE, "Error: must be on or off"); return true; }
+    _prefs.getCustom()->setByKey(OBSERVER_SERIAL_KEY, _serial_observer ? "1" : "0");
+    savePrefs();
+    snprintf(reply, CLI_EXTRA_REPLY_SIZE, "OK - observer.serial %s", _serial_observer ? "on" : "off");
+#else
+    snprintf(reply, CLI_EXTRA_REPLY_SIZE, "Error: no serial observer in this build");
+#endif
+    return true;
+  }
+#ifdef WITH_MQTT_UPLINK
+  if (uplink.handleCommand(command, reply, CLI_EXTRA_REPLY_SIZE)) return true;
+#endif
+  return false;
+}
+
+#ifdef WITH_MQTT_UPLINK
+void MyMesh::uplinkLoop() {
+  // Set the clock from SNTP once WiFi is up. Only forwards: a clock moved
+  // back would make the next adverts look older than the ones already sent.
+  if (!_uplink_clock_synced) {
+    uint32_t ntp = uplink.ntpTime();
+    if (ntp) {
+      if (getRTCClock()->getCurrentTime() < ntp) getRTCClock()->setCurrentTime(ntp);
+      _uplink_clock_synced = true;
+    }
+  }
+
+  if (uplink.statusDue()) {
+    char radio[48], name[72], model[72];
+    snprintf(radio, sizeof(radio), "%.3f,%.1f,%u,%u", _prefs.freq, _prefs.bw, (unsigned)_prefs.sf, (unsigned)_prefs.cr);
+    meshcore_json_escape(name, sizeof(name), _prefs.node_name);
+    meshcore_json_escape(model, sizeof(model), board.getManufacturerName());
+
+    MeshcoreStatusJson sj = {};
+    sj.status = "online";
+    sj.epoch = getRTCClock()->getCurrentTime();
+    sj.origin = name;
+    sj.radio = radio;
+    sj.model = model;
+    sj.firmware_version = FIRMWARE_VERSION_FULL;
+    sj.battery_mv = board.getBattMilliVolts();
+    sj.uptime_secs = (unsigned)(uptime_millis / 1000);
+    sj.debug_flags = _err_flags;
+    sj.queue_len = _mgr->getOutboundTotal();
+    sj.noise_floor = _radio->getNoiseFloor();
+    sj.tx_air_secs = getTotalAirTime() / 1000;
+    sj.rx_air_secs = getReceiveAirTime() / 1000;
+    sj.recv_errors = radio_driver.getPacketsRecvErrors();
+    sj.repeat = _prefs.disable_fwd == 0;
+    uplink.queueStatus(sj);
+  }
+}
+#endif
 
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
@@ -1354,6 +1457,10 @@ void MyMesh::loop() {
     acl.save(_fs);
     dirty_contacts_expiry = 0;
   }
+
+#ifdef WITH_MQTT_UPLINK
+  uplinkLoop();
+#endif
 
   // update uptime
   uint32_t now = millis();

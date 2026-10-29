@@ -171,6 +171,16 @@ void RadioLibWrapper::requestRestartRecv() {
 }
 
 // PowerSaving variant
+void RadioLibWrapper::pollIrqLine() {
+  uint32_t pin = _board->getIRQGpio();
+  if (pin != (uint32_t)-1 && digitalRead(pin) == HIGH) {
+    noInterrupts();
+    setFlag();
+    interrupts();
+  }
+}
+
+// PowerSaving variant
 bool RadioLibWrapper::isPacketPendingOrReceiving() {
   return (state & STATE_INT_READY) != 0 || isReceivingPacket();
 }

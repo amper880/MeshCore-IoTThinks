@@ -177,6 +177,11 @@ public:
     inhibit_sleep = inhibit;
   }
 
+  // OTA running, or the user button was pressed recently
+  bool isSleepInhibited() const {
+    return inhibit_sleep || (int32_t)(inhibit_sleep_until - millis()) > 0;
+  }
+
   uint32_t getResetReason() const override {
     return esp_reset_reason();
   }

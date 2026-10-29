@@ -1233,3 +1233,10 @@ Repeater, Room Server, Sensor and Companion. SX1262 and LR1110 receive in a duty
 
 Builds with the Epever module (`ENV_INCLUDE_EPEVER`) add `get sensors`, `get epever` and
 `set epever on|off`. See [epever.md](epever.md).
+
+---
+
+### Packet observer module
+
+Builds with the observer module add `get|set observer.serial` (serial, nRF52) or
+`get|set uplink.*` (WiFi/MQTT, ESP32). See [observer.md](observer.md).

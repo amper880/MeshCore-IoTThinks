@@ -2,6 +2,13 @@
 
 #if MESH_PACKET_LOGGING
   #include <Arduino.h>
+
+  // Called before every packet log line. Returning false drops the line (the
+  // serial observer switched off with `set observer.serial off`). The
+  // firmware's main can also end a half-typed CLI echo here, so each packet
+  // line starts at column 0 for tools that read the console line by line
+  // (meshcoretomqtt).
+  extern "C" __attribute__((weak)) bool mesh_packet_log_line_start() { return true; }
 #endif
 
 #include <math.h>
@@ -218,6 +225,7 @@ void Dispatcher::checkRecv() {
   }
   if (pkt) {
     #if MESH_PACKET_LOGGING
+    if (mesh_packet_log_line_start()) {
     Serial.print(getLogDateTime());
     Serial.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d time=%d", 
             pkt->getRawLength(), pkt->getPayloadType(), pkt->isRouteDirect() ? "D" : "F", pkt->payload_len,
@@ -233,6 +241,7 @@ void Dispatcher::checkRecv() {
       Serial.printf(" [%02X -> %02X]\n", (uint32_t)pkt->payload[1], (uint32_t)pkt->payload[0]);
     } else {
       Serial.printf("\n");
+    }
     }
     #endif
     logRx(pkt, pkt->getRawLength(), score);   // hook for custom logging
@@ -339,6 +348,7 @@ void Dispatcher::checkSend() {
       outbound_expiry = futureMillis(max_airtime);
 
     #if MESH_PACKET_LOGGING
+      if (mesh_packet_log_line_start()) {
       Serial.print(getLogDateTime());
       Serial.printf(": TX, len=%d (type=%d, route=%s, payload_len=%d)", 
             len, outbound->getPayloadType(), outbound->isRouteDirect() ? "D" : "F", outbound->payload_len);
@@ -347,6 +357,7 @@ void Dispatcher::checkSend() {
         Serial.printf(" [%02X -> %02X]\n", (uint32_t)outbound->payload[1], (uint32_t)outbound->payload[0]);
       } else {
         Serial.printf("\n");
+      }
       }
     #endif
     }

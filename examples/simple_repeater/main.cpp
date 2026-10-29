@@ -23,12 +23,62 @@ void halt() {
 }
 
 static char command[160];
+
+static bool echo_open = false;   // CLI echo printed, line not yet ended
+
+#ifdef WITH_SERIAL_OBSERVER
+// Serial observer: drops the packet lines while `set observer.serial off`,
+// and never glues a packet line to a half-typed command's echo (the line
+// parser on the other end would lose that packet).
+extern "C" bool mesh_packet_log_line_start() {
+  if (!the_mesh.isSerialObserverOn()) return false;
+  if (echo_open) {
+    Serial.print("\r\n");
+    echo_open = false;
+  }
+  return true;
+}
+#endif
 #ifdef ETHERNET_ENABLED
 static char ethernet_command[160];
 #endif
 
 // For power saving
 unsigned long POWERSAVING_FIRSTSLEEP_SECS = 300; // The first sleep (if enabled) from boot
+
+#ifdef WITH_MQTT_UPLINK
+#include <helpers/PowerSaving.h>
+#ifndef UPLINK_IDLE_MS
+#define UPLINK_IDLE_MS 20   // max. extra latency before a received packet is noticed
+#endif
+#ifndef ESP32_CPU_FREQ
+#define ESP32_CPU_FREQ 80
+#endif
+static bool uplink_auto_sleep = false;
+
+// PowerSaving with the WiFi uplink running. The manual light sleep of the
+// plain PowerSaving build (board.sleep()) would drop the WiFi association, so
+// here ESP-IDF's automatic light sleep takes over: the CPU sleeps whenever all
+// tasks are idle and WiFi wakes only for the AP's DTIM beacons (modem sleep).
+// The loop idles in short delays; after each one the DIO1 level is checked,
+// as an edge that came during light sleep may not have reached the ISR.
+static void uplinkIdle() {
+  if (!uplink_auto_sleep) {
+    if (PowerSaving::configurePowerManagement(ESP32_CPU_FREQ, 10, true) == ESP_OK) {
+      uplink_auto_sleep = true;
+    }
+  }
+  delay(UPLINK_IDLE_MS);
+  radio_driver.pollIrqLine();
+}
+
+static void uplinkAwake() {
+  if (uplink_auto_sleep) {
+    PowerSaving::configurePowerManagement(ESP32_CPU_FREQ, ESP32_CPU_FREQ, false);
+    uplink_auto_sleep = false;
+  }
+}
+#endif
 
 #if defined(PIN_USER_BTN) && defined(_SEEED_SENSECAP_SOLAR_H_)
 static unsigned long userBtnDownAt = 0;
@@ -150,6 +200,7 @@ void loop() {
       command[len++] = c;
       command[len] = 0;
       Serial.print(c);
+      echo_open = (c != '\r');
     }
     if (c == '\r') break;
   }
@@ -160,6 +211,7 @@ void loop() {
 
   if (len > 0 && command[len - 1] == '\r') {  // received complete line
     Serial.print('\n');
+    echo_open = false;
     command[len - 1] = 0;  // replace newline with C string null terminator
     char reply[160];
     reply[0] = 0;
@@ -217,11 +269,25 @@ void loop() {
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.loop();
 #endif
+#ifdef WITH_MQTT_UPLINK
+  if (uplink.isRunning() && !the_mesh.getNodePrefs()->powersaving_enabled) {
+    uplinkAwake();   // powersaving switched off at runtime
+  }
+#endif
   if (the_mesh.getNodePrefs()->powersaving_enabled && !the_mesh.hasPendingWork()) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
 #else
     if (the_mesh.millisHasNowPassed(POWERSAVING_FIRSTSLEEP_SECS * 1000)) { // To check if it is time to sleep
+#ifdef WITH_MQTT_UPLINK
+      if (uplink.isRunning()) {
+        if (board.isSleepInhibited()) {
+          uplinkAwake();  // OTA / button: stay awake, as board.sleep() would
+        } else {
+          uplinkIdle();   // automatic light sleep, WiFi stays associated
+        }
+      } else
+#endif
       board.sleep(30); // Sleep. Wake up after a while or when receiving a LoRa packet
     }
 #endif

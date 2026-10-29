@@ -37,6 +37,14 @@
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
 
+#ifdef WITH_MQTT_UPLINK
+#include <helpers/esp32/MqttUplink.h>
+#endif
+
+#if defined(WITH_SERIAL_OBSERVER) && !MESH_PACKET_LOGGING
+  #error "WITH_SERIAL_OBSERVER needs MESH_PACKET_LOGGING=1"
+#endif
+
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
 #endif
@@ -116,6 +124,17 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_sf;
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
+#ifdef WITH_MQTT_UPLINK
+  uint8_t _uplink_raw[256];      // raw bytes of the packet being received (logRxRaw -> logRx)
+  int     _uplink_raw_len = 0;
+  float   _uplink_rssi = 0;
+  bool    _uplink_clock_synced = false;
+  void    uplinkLoop();
+#endif
+#ifdef WITH_SERIAL_OBSERVER
+  bool    _serial_observer = true;   // `set observer.serial on|off`
+#endif
+  bool    handleObserverCommand(const char* command, char* reply);
 #if defined(WITH_RS232_BRIDGE)
   RS232Bridge bridge;
 #elif defined(WITH_ESPNOW_BRIDGE)
@@ -257,6 +276,10 @@ public:
 
   // To check if there is pending work
   bool hasPendingWork() const;
+
+#ifdef WITH_SERIAL_OBSERVER
+  bool isSerialObserverOn() const { return _serial_observer; }
+#endif
 
   bool setRxBoostedGain(bool enable) override;
 
