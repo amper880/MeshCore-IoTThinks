@@ -35,6 +35,12 @@
   #define FIRMWARE_VERSION   "v1.18.0"
 #endif
 
+#include <helpers/ModuleVersion.h>   // FIRMWARE_VERSION + optional module versions
+
+// Room for module CLI replies: the reply buffers are 160 bytes (serial) and
+// 161 (remote CLI), less an optional 3-byte "xx|" prefix.
+#define CLI_EXTRA_REPLY_SIZE  156
+
 #ifndef LORA_FREQ
   #define LORA_FREQ   915.0
 #endif
@@ -180,7 +186,7 @@ public:
   void begin(FILESYSTEM* fs);
   void addSystemPost(const char* postData);
 
-  const char* getFirmwareVer() override { return FIRMWARE_VERSION; }
+  const char* getFirmwareVer() override { return FIRMWARE_VERSION_FULL; }
   const char* getBuildDate() override { return FIRMWARE_BUILD_DATE; }
   const char* getRole() override { return FIRMWARE_ROLE; }
   const char* getNodeName() { return _prefs.node_name; }
