@@ -1228,3 +1228,8 @@ Repeater, Room Server, Sensor and Companion. SX1262 and LR1110 receive in a duty
 **Errors:** a profile that does not fit the active SF/BW is rejected, or, after a radio change, leaves the node in continuous RX with `err=-10001` while the saved choice is kept. Other nonzero `err` values come from the radio driver; after three failed arm attempts the node stays in continuous RX until the setting changes. `set radio` takes effect at reboot; until then the windows of the running modulation stay in use.
 
 ---
+
+### Packet observer module
+
+Builds with the observer module add `get|set observer.serial` (serial, nRF52) or
+`get|set uplink.*` (WiFi/MQTT, ESP32). See [observer.md](observer.md).

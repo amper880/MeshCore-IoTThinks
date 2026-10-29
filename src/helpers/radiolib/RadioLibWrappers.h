@@ -113,6 +113,12 @@ public:
 
   bool hasPendingReceive() { return isPacketPendingOrReceiving(); }
 
+  // PowerSaving + WiFi uplink (ESP32 auto light sleep): a DIO1 edge that
+  // arrives while the GPIO block is clock-gated can be missed. The radio
+  // keeps DIO1 high until its IRQ is cleared, so checking the level after
+  // each wake recovers the event. Same effect as the ISR firing.
+  void pollIrqLine();
+
   bool isReceiving() override {
     if (isReceivingPacket()) return true;
 
